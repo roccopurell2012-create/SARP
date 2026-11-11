@@ -1,0 +1,31 @@
+SARP 1.1 — Staff tools update
+
+GitHub returned HTTP 403 (Resource not accessible by integration). This update has NOT been pushed to GitHub.
+
+Included:
+- SARP-staff-update/: complete updated source.
+- staff-tools-update.patch: all changes against GitHub main commit 0c03f4f7e5492741a2c075fcbc9b99501bff4167.
+- README.md inside the source folder: configuration, deployment and feature instructions.
+
+Using the full source:
+1. Extract into a new folder.
+2. Copy your existing .env and data/ folder into it.
+3. Run npm install, then npm test.
+4. Run npm run deploy.
+5. Stop the old bot and start this version with npm start.
+6. Run /setup in Discord as the Owner. It updates the dashboard and panels and posts the updated staff guide automatically.
+
+Using an existing git clone at the above base revision:
+  git apply /path/to/staff-tools-update.patch
+  npm install
+  npm test
+  git add .gitignore README.md commands config events package.json tests utils
+  git commit -m "Add staff IDs, staff tickets, guide editor and owner bot DMs"
+  git push origin main
+If your clone has changed since the base revision, review any conflicts before applying.
+
+IMPORTANT: Preserve data/staff_identities.json and data/settings.json on persistent storage, or configure SARP_DATA_DIR. They hold permanent staff IDs, registered emails, guide buttons and panel references. Use one bot process with this JSON store.
+
+No inbox access or email delivery is needed. Management binds each address to a Discord member. New tools appear in the existing dashboard and guide; the slash-command count remains 13.
+
+Checks: 27 offline tests passed, JavaScript syntax checks passed, and git diff --check passed. No live Discord messages were sent during development.

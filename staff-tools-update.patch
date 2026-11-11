@@ -1,0 +1,1331 @@
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..9f77d70
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,3 @@
++node_modules/
++data/
++.env
+diff --git a/README.md b/README.md
+index fbb201b..3ebc72b 100644
+--- a/README.md
++++ b/README.md
+@@ -1,10 +1,54 @@
+-# Los Angeles RP — Simple Bot
++# Los Angeles RP — Simple Bot (1.1)
+ 
+ This version keeps the requested server tools and channel layout. Session commands are removed, following the final correction in the request.
+ 
++
++## New in 1.1 — DMs, staff emails/IDs, and editable staff guide
++
++Run `/setup` after updating and restarting the bot. Setup reuses existing channels/roles and updates the dashboard, create-ticket panel, application panel, and staff guide instead of posting duplicates. Older duplicate panels authored by this bot are removed; member messages are preserved. Guide-button changes publish the replacement guide/dashboard before deleting their old panels.
++
++### Owner / Co-Owner dashboard
++
++- **Send Bot DM** → select a current server member → type a message → Submit. The bot sends that text as a Discord DM. Failed deliveries are reported instead of claiming success. Bot logs record sender/recipient, without copying private DM content.
++- **Staff Emails / IDs** → **Add / Update Email** → select the Discord member the address belongs to → enter their assigned staff email. Addresses are normalised and cannot be assigned to two members in the same server. Changing an address keeps that member's existing ID.
++- **Staff Guide Settings** → **Add**, **Edit**, or **Remove** information buttons. Each button has a label and information shown privately when clicked. Up to 19 information buttons are supported. The fixed **Get Staff ID** button cannot be removed. Submitted changes immediately refresh the guide and dashboard.
++
++Every stage of these controls checks Owner/Co-Owner access, including modal submissions and select menus. They do not depend solely on channel visibility.
++
++### Staff members
++
++Open **staff-guide** → **Get Staff ID** → enter the email registered to your Discord account. The bot assigns a permanent ID such as `LA-STAFF-0001`. Repeating the process returns the same ID. You must be a current staff member and the address must be assigned to your own Discord account. An email address by itself is not proof of ownership, which is why management selects its Discord owner during registration.
++
++**No email inbox access, password, email verification link, or email delivery is used.** All interaction happens inside Discord.
++
++### Staff Only tickets
++
++Open Ticket → **Staff Only Tickets** → choose one of:
++
++- Report Another Staff Member
++- Log Unlogged Hours
++- Contest an Infraction
++- Contest a Strike
++- Contest a Warning
++- Contest a Demotion
++- Other Staff Support
++
++Then select priority and enter your own staff ID and the requested details. The ID field includes: “Go to staff guide to get your staff ID”. Missing, incorrect, or another member's IDs are rejected before a channel is created. Non-staff cannot open these tickets, even with a previously assigned ID. Ordinary player tickets still work without a staff ID.
++
++The staff ID is recorded on the ticket and shown in the ticket/queue summary. Staff tickets use the existing Support Staff + Owner/Co-Owner ticket queue and claim workflow. These are requests for staff review; the bot does not restore automated infractions, strikes, warnings, hours, or demotion-appeal decisions.
++
++### Persistent data and deployment
++
++Keep the bot's `data/` directory on persistent storage, or set `SARP_DATA_DIR` to a persistent directory. `staff_identities.json` stores email/member/ID mappings; `settings.json` stores guide buttons and panel message IDs. Preserve these files across restarts and deployments so existing staff IDs and edits remain available. Run one bot process for this JSON-backed deployment.
++
++After updating: `npm install`, `npm test`, `npm run deploy`, restart with `npm start`, then run `/setup` in Discord. The slash-command count remains 13; the new tools are dashboard/guide controls. The bot needs View Channel, Read Message History, Send Messages, Manage Channels, and Manage Roles as applicable; pinning guide sections also requires the corresponding permission. `/setup` grants the bot access to its managed channels.
++
++Validation: 27 offline regression tests, including a real datastore reload in separate Node processes. Tests mock Discord interactions and message operations; no live Discord messages or tickets were sent during development.
++
++
+ ## Features kept
+ 
+-- Staff dashboard with welcome, tickets, automatic welcome roles, applications/results, logging, announcements, promotions/demotions, partnerships, rules editing, and offices.
++- Staff dashboard with welcome, tickets, automatic welcome roles, applications/results, logging, announcements, promotions/demotions, partnerships, rules editing, offices, bot DMs, staff email/ID registration, and staff-guide settings.
+ - Complete ticket system: create-ticket panel, configurable types/questions, priority, private intake channels, staff queue, claiming, closing/reopening, transcripts, role escalation, transfer, ratings, and ticket statistics. Ban Appeal and Report a Player tickets remain.
+ - Welcome messages, member verification, and automatic welcome roles.
+ - Complete Discord/in-game rules system.
+@@ -46,7 +90,7 @@ Setup reuses existing channels and roles and does not delete or clone them. Stat
+ - Infractions, LOA, blacklist, blacklist appeals, duty/shifts, hours, rosters, and leaderboards. Their legacy staff rooms remain as noted above.
+ - Member/staff profile commands, profile editing, and private staff notes.
+ - Staff termination controls.
+-- General Send DM and Edit Bot controls.
++- Edit Bot controls. Send Bot DM is restored as an Owner/Co-Owner tool in version 1.1.
+ - Activity checks, weekly digests, raid/spam/nuke alerts, and automatic spam penalties.
+ - Maintenance shutdown/startup and lockdown tools.
+ - Backup/restore and mass/server-wide message deletion commands.
+diff --git a/commands/reopen.js b/commands/reopen.js
+index 3e26b01..5fecba7 100644
+--- a/commands/reopen.js
++++ b/commands/reopen.js
+@@ -30,7 +30,7 @@ module.exports = {
+       ]
+     });
+ 
+-    const ticketType = ticketTypesUtil.getTicketTypes(interaction.guild.id)[ticket.type];
++    const ticketType = ticketTypesUtil.getTicketType(interaction.guild.id, ticket.type);
+     const embed = new EmbedBuilder()
+       .setTitle(`🎫 Ticket Reopened — ${ticketType?.label || ticket.type}`)
+       .setDescription(`This ticket was reopened by <@${interaction.user.id}>.\n\n**Previous close reason:** ${ticket.closeReason || "N/A"}`)
+diff --git a/commands/staffguide.js b/commands/staffguide.js
+index d9bbf02..0d8fbc5 100644
+--- a/commands/staffguide.js
++++ b/commands/staffguide.js
+@@ -1,81 +1,21 @@
+-const { SlashCommandBuilder, PermissionFlagsBits, EmbedBuilder } = require("discord.js");
+-const structure = require("../config/structure.js");
+-
++const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
++const { getGuideConfig, saveGuideConfig, publishStaffGuide } = require('../utils/staffGuide');
+ module.exports = {
+-  data: new SlashCommandBuilder()
+-    .setName("staffguide")
+-    .setDescription("Builds and posts the full staff guide with dashboard, expectations, and punishment guide links.")
+-    .addStringOption(opt => opt.setName("melonly_link").setDescription("Your Melonly staff dashboard URL").setRequired(false))
++  data: new SlashCommandBuilder().setName('staffguide')
++    .setDescription('Publish or update the staff guide and permanent staff ID controls.')
++    .addStringOption(opt => opt.setName('melonly_link').setDescription('Your Melonly staff dashboard URL').setRequired(false))
+     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+-
+   async execute(interaction) {
+-    const channel = interaction.guild.channels.cache.find(c => c.name.includes("staff-guide"));
+-    if (!channel) return interaction.reply({ content: "Couldn't find the staff-guide channel. Run /setup first.", ephemeral: true });
+-
+-    const melonlyLink = interaction.options.getString("melonly_link") || "https://melonly.xyz/";
+-
+-    // Main guide embed
+-    const mainEmbed = new EmbedBuilder()
+-      .setTitle("📘 Staff Guide")
+-      .setDescription("Everything staff need to know is linked below. Read the guide before getting started.")
+-      .addFields(
+-        { name: "1️⃣ Staff Dashboard (Melonly)", value: `[Open Dashboard](${melonlyLink})\nOpen your external staff dashboard here.` },
+-        { name: "2️⃣ Getting Started (Patrol)", value: "See the pinned message below for light strings and reporting staff misconduct." },
+-        { name: "3️⃣ Staff Expectations", value: "See the pinned message below for the full top-down expectations list." },
+-        { name: "4️⃣ Punishment Guide", value: "See the pinned message below for the community punishment guide." }
+-      )
+-      .setColor(structure.embedColor)
+-      .setTimestamp();
+-
+-    await channel.send({ embeds: [mainEmbed] });
+-
+-    // Getting Started (Light Strings, Reporting)
+-    const gettingStartedEmbed = new EmbedBuilder()
+-      .setTitle("👋 Welcome to the Staff Team!")
+-      .setDescription("We're glad to have you on board. Before you get started, here's how things work here:")
+-      .addFields(
+-        { name: "🚨 Light Strings (Patrol Vehicle)", value: "• Light String 1 — use this while patrolling and driving around\n• Light String 2 — use this when pulling someone over / initiating a traffic stop\n• Light String 3 — switch to this whenever you park or get out of your vehicle" },
+-        { name: "⚠️ Reporting Other Staff", value: "• If you catch a staff member breaking ERLC rules or Discord rules, do **NOT** handle it yourself\n• Report it directly to the Co-Owner or Owner immediately — no exceptions, no matter who it is" }
+-      )
+-      .setFooter({ text: "This is part of your training — if anything here is unclear, ask before getting started." })
+-      .setColor(structure.embedColor);
+-    const gsMsg = await channel.send({ embeds: [gettingStartedEmbed] });
+-    await gsMsg.pin().catch(() => {});
+-
+-    // Staff Expectations (top-down list)
+-    const expectationsEmbed = new EmbedBuilder()
+-      .setTitle("📋 Staff Expectations")
+-      .setDescription([
+-        "**1.** Stay professional and impartial at all times — in-character and out.",
+-        "**2.** Respond to tickets within 30 minutes while available.",
+-        "**3.** Log every promotion and demotion — no verbal-only actions.",
+-        "**4.** Never abuse admin commands or grant yourself unfair advantages.",
+-        "**5.** Escalate anything you're unsure about to Head Staff/Management — don't guess.",
+-        "**6.** Treat every member with respect, regardless of rank.",
+-        "**7.** Report fellow staff misconduct immediately — no covering for each other."
+-      ].join("\n"))
+-      .setColor(structure.embedColor);
+-    const expMsg = await channel.send({ embeds: [expectationsEmbed] });
+-    await expMsg.pin().catch(() => {});
+-
+-    // Punishment Guide
+-    const punishmentEmbed = new EmbedBuilder()
+-      .setTitle("⚖️ Punishment Guide")
+-      .setDescription([
+-        "**Community Members:**",
+-        "Warning 1 — Verbal warning",
+-        "Warning 2 — Verbal warning",
+-        "Warning 3 — Verbal warning + final warning DM",
+-        "Warning 4 — Kick",
+-        "Warning 5 — Permanent ban"
+-
+-      ].join("\n"))
+-      .setColor(structure.embedColor);
+-    const punMsg = await channel.send({ embeds: [punishmentEmbed] });
+-    await punMsg.pin().catch(() => {});
+-
+-    await interaction.reply({ content: `✅ Staff guide built and posted in ${channel}.`, ephemeral: true });
++    if (!interaction.member.permissions.has(PermissionFlagsBits.ManageGuild)) return interaction.reply({ content: 'You need Manage Server permission to publish the guide.', ephemeral: true });
++    const link = interaction.options.getString('melonly_link');
++    if (link) {
++      let url;
++      try { url = new URL(link); } catch { return interaction.reply({ content: 'Enter a valid HTTPS dashboard link.', ephemeral: true }); }
++      if (url.protocol !== 'https:' || /[\s()]/.test(link)) return interaction.reply({ content: 'Enter a valid HTTPS dashboard link.', ephemeral: true });
++      const config = getGuideConfig(interaction.guild.id); config.melonlyLink = link; saveGuideConfig(interaction.guild.id, config);
++    }
++    await interaction.deferReply({ ephemeral: true });
++    const channel = await publishStaffGuide(interaction.guild);
++    return interaction.editReply({ content: `✅ Staff guide updated in ${channel}.` });
+   }
+ };
+-
+-
+diff --git a/config/structure.js b/config/structure.js
+index d01e3a3..f01a816 100644
+--- a/config/structure.js
++++ b/config/structure.js
+@@ -244,6 +244,45 @@ module.exports = {
+     ] }
+   },
+ 
++  // Staff intake requests only; these do not re-enable old hours or punishment systems.
++  staffTicketTypes: {
++    STAFF_REPORT: { label: "Report Another Staff Member", staffOnly: true, staffRole: "SUPPORT", questions: [
++      { id: "q1", label: "Brief summary / staff member involved" },
++      { id: "q2", label: "Details, dates and relevant context" },
++      { id: "q3", label: "Evidence / links (or say none)" }
++    ] },
++    STAFF_HOURS: { label: "Log Unlogged Hours", staffOnly: true, staffRole: "SUPPORT", questions: [
++      { id: "q1", label: "Brief summary / staff member involved" },
++      { id: "q2", label: "Details, dates and relevant context" },
++      { id: "q3", label: "Evidence / links (or say none)" }
++    ] },
++    STAFF_INFRACTION: { label: "Contest an Infraction", staffOnly: true, staffRole: "SUPPORT", questions: [
++      { id: "q1", label: "Brief summary / staff member involved" },
++      { id: "q2", label: "Details, dates and relevant context" },
++      { id: "q3", label: "Evidence / links (or say none)" }
++    ] },
++    STAFF_STRIKE: { label: "Contest a Strike", staffOnly: true, staffRole: "SUPPORT", questions: [
++      { id: "q1", label: "Brief summary / staff member involved" },
++      { id: "q2", label: "Details, dates and relevant context" },
++      { id: "q3", label: "Evidence / links (or say none)" }
++    ] },
++    STAFF_WARNING: { label: "Contest a Warning", staffOnly: true, staffRole: "SUPPORT", questions: [
++      { id: "q1", label: "Brief summary / staff member involved" },
++      { id: "q2", label: "Details, dates and relevant context" },
++      { id: "q3", label: "Evidence / links (or say none)" }
++    ] },
++    STAFF_DEMOTION: { label: "Contest a Demotion", staffOnly: true, staffRole: "SUPPORT", questions: [
++      { id: "q1", label: "Brief summary / staff member involved" },
++      { id: "q2", label: "Details, dates and relevant context" },
++      { id: "q3", label: "Evidence / links (or say none)" }
++    ] },
++    STAFF_OTHER: { label: "Other Staff Support", staffOnly: true, staffRole: "SUPPORT", questions: [
++      { id: "q1", label: "Brief summary / staff member involved" },
++      { id: "q2", label: "Details, dates and relevant context" },
++      { id: "q3", label: "Evidence / links (or say none)" }
++    ] },
++  },
++
+   // ---------------- RULE SETS ----------------
+   // Selectable via /rules create dropdown. Each is posted as its own embed.
+   ruleSets: {
+diff --git a/events/interactionCreate.js b/events/interactionCreate.js
+index d9975ca..47fd36d 100644
+--- a/events/interactionCreate.js
++++ b/events/interactionCreate.js
+@@ -1,4 +1,6 @@
+ const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelType, StringSelectMenuBuilder, UserSelectMenuBuilder, RoleSelectMenuBuilder, ModalBuilder, TextInputBuilder, TextInputStyle } = require("discord.js");
++const { handleStaffTools } = require("../utils/staffTools");
++const staffIdentity = require("../utils/staffIdentity");
+ const structure = require("../config/structure.js");
+ const db = require("../utils/dataStore.js");
+ const rolesUtil = require("../utils/roles.js");
+@@ -199,6 +201,7 @@ module.exports = {
+   },
+ 
+   async _handle(interaction, client) {
++    if (await handleStaffTools(interaction)) return;
+     // Older Discord messages can outlive the features that created their controls.
+     if (interaction.customId && /^(?:dash_(?:moderation|loa|blacklist|shifts)$|loa_|hr_|ia_|case_|search_case(?:_|$)|removeinfraction_select::|dash_(?:departments|performance_review|terminate|dm|editbot|mass_delete|activity_check)$|dept_|perf_review_|terminate_|dm_|editbot_|owner_shutdown_|antiraid_|restore_|editprofile_|mass_delete_)/.test(interaction.customId)) {
+       return interaction.reply({ content: "This feature has been removed from the bot. Please use the updated dashboard.", ephemeral: true });
+@@ -291,7 +294,7 @@ module.exports = {
+       const embed = new EmbedBuilder()
+         .setTitle("🎫 Ticket System")
+         .setDescription(open.length
+-          ? open.map(t => `• <#${t.channelId}> — ${ticketTypesUtil.getTicketTypes(interaction.guild.id)[t.type]?.label || t.type} — <@${t.userId}>`).join("\n")
++          ? open.map(t => `• <#${t.channelId}> — ${ticketTypesUtil.getTicketType(interaction.guild.id, t.type)?.label || t.type} — <@${t.userId}>`).join("\n")
+           : "No open tickets right now.")
+         .setColor(structure.embedColor);
+       const editRow = new ActionRowBuilder().addComponents(
+@@ -649,42 +652,46 @@ module.exports = {
+ 
+     // ================= OPEN TICKET (menu) =================
+     if (interaction.isButton() && interaction.customId === "ticket_open") {
+-      const menu = new StringSelectMenuBuilder()
+-        .setCustomId("ticket_type_select")
+-        .setPlaceholder("Choose a ticket type")
+-        .addOptions(Object.entries(ticketTypesUtil.getTicketTypes(interaction.guild.id)).map(([key, t]) => ({ label: t.label, value: key })));
+-      const row = new ActionRowBuilder().addComponents(menu);
+-      return interaction.reply({ content: "What type of ticket do you need?", components: [row], ephemeral: true });
++      const options = Object.entries(ticketTypesUtil.getTicketTypes(interaction.guild.id)).slice(0, 24).map(([key, t]) => ({ label: t.label.slice(0, 100), value: key }));
++      if (staffIdentity.isStaff(interaction.guild, interaction.member)) options.push({ label: 'Staff Only Tickets', value: 'STAFF_ONLY', description: 'A permanent staff ID is required' });
++      const menu = new StringSelectMenuBuilder().setCustomId('ticket_type_select').setPlaceholder('Choose a ticket type').addOptions(options);
++      return interaction.reply({ content: 'What type of ticket do you need?', components: [new ActionRowBuilder().addComponents(menu)], ephemeral: true });
+     }
+ 
+     // ================= TICKET TYPE SELECTED -> PRIORITY QUESTION =================
+-    if (interaction.isStringSelectMenu() && interaction.customId === "ticket_type_select") {
++    if (interaction.isStringSelectMenu() && ['ticket_type_select', 'staffticket_type_select'].includes(interaction.customId)) {
+       const typeKey = interaction.values[0];
+-      const menu = new StringSelectMenuBuilder()
+-        .setCustomId(`ticket_priority_intake::${typeKey}`)
+-        .setPlaceholder("How critical is this?")
+-        .addOptions(
+-          { label: "🟢 Low", value: "low" },
+-          { label: "🔵 Normal", value: "normal" },
+-          { label: "🟠 High", value: "high" },
+-          { label: "🔴 Urgent", value: "urgent" }
+-        );
+-      const row = new ActionRowBuilder().addComponents(menu);
+-      return interaction.update({ content: "How critical is this?", components: [row] });
++      if (typeKey === 'STAFF_ONLY') {
++        if (!staffIdentity.isStaff(interaction.guild, interaction.member)) return interaction.reply({ content: 'Staff Only tickets are for current staff members.', ephemeral: true });
++        const menu = new StringSelectMenuBuilder().setCustomId('staffticket_type_select').setPlaceholder('Choose your staff ticket reason')
++          .addOptions(Object.entries(structure.staffTicketTypes).map(([key, t]) => ({ label: t.label, value: key })));
++        return interaction.update({ content: 'Choose a staff ticket reason. Your own staff ID is required. Go to staff guide to get your staff ID.', components: [new ActionRowBuilder().addComponents(menu)] });
++      }
++      const ticketType = ticketTypesUtil.getTicketType(interaction.guild.id, typeKey);
++      if (!ticketType) return interaction.reply({ content: 'This ticket type is no longer available.', ephemeral: true });
++      if (ticketTypesUtil.isStaffTicketType(typeKey) && !staffIdentity.isStaff(interaction.guild, interaction.member)) return interaction.reply({ content: 'Staff Only tickets are for current staff members.', ephemeral: true });
++      const menu = new StringSelectMenuBuilder().setCustomId(`ticket_priority_intake::${typeKey}`).setPlaceholder('How critical is this?')
++        .addOptions({ label: '🟢 Low', value: 'low' }, { label: '🔵 Normal', value: 'normal' }, { label: '🟠 High', value: 'high' }, { label: '🔴 Urgent', value: 'urgent' });
++      return interaction.update({ content: 'How critical is this?', components: [new ActionRowBuilder().addComponents(menu)] });
+     }
+ 
+     // ================= TICKET PRIORITY ANSWERED -> INTAKE QUESTIONS MODAL =================
+     if (interaction.isStringSelectMenu() && interaction.customId.startsWith("ticket_priority_intake::")) {
+       const typeKey = interaction.customId.replace("ticket_priority_intake::", "");
+       const priority = interaction.values[0];
+-      const ticketType = ticketTypesUtil.getTicketTypes(interaction.guild.id)[typeKey];
++      const ticketType = ticketTypesUtil.getTicketType(interaction.guild.id, typeKey);
+ 
++      if (!ticketType || !['low', 'normal', 'high', 'urgent'].includes(priority)) return interaction.reply({ content: 'Open the ticket menu again to choose a valid ticket type and priority.', ephemeral: true });
++      const staffOnly = ticketTypesUtil.isStaffTicketType(typeKey);
++      if (staffOnly && !staffIdentity.isStaff(interaction.guild, interaction.member)) return interaction.reply({ content: 'Staff Only tickets are for current staff members.', ephemeral: true });
+       const modal = new ModalBuilder().setCustomId(`ticket_intake::${typeKey}::${priority}`).setTitle(ticketType.label.slice(0, 45));
+       const rows = ticketType.questions.map(q =>
+         new ActionRowBuilder().addComponents(
+           new TextInputBuilder().setCustomId(q.id).setLabel(q.label.slice(0, 45)).setStyle(TextInputStyle.Paragraph).setRequired(true)
+         )
+       );
++      if (staffOnly) rows.unshift(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('staffId').setLabel('Your Staff ID').setPlaceholder('Go to staff guide to get your staff ID').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(40)));
++      if (rows.length > 5) return interaction.reply({ content: 'This ticket form has too many questions. Please contact management.', ephemeral: true });
+       modal.addComponents(...rows);
+       return interaction.showModal(modal);
+     }
+@@ -692,12 +699,21 @@ module.exports = {
+     // ================= TICKET INTAKE MODAL SUBMITTED -> CREATE PRIVATE CHANNEL + QUEUE POST =================
+     if (interaction.isModalSubmit() && interaction.customId.startsWith("ticket_intake::")) {
+       const [, typeKey, priority] = interaction.customId.split("::");
+-      const ticketType = ticketTypesUtil.getTicketTypes(interaction.guild.id)[typeKey];
++      const ticketType = ticketTypesUtil.getTicketType(interaction.guild.id, typeKey);
+       const guild = interaction.guild;
+       const PRIORITY_EMOJI = { low: "🟢", normal: "🔵", high: "🟠", urgent: "🔴" };
+ 
++      if (!ticketType || !Object.hasOwn(PRIORITY_EMOJI, priority)) return interaction.reply({ content: 'Open the ticket menu again to choose a valid ticket type and priority.', ephemeral: true });
++      const staffOnly = ticketTypesUtil.isStaffTicketType(typeKey);
++      let staffRecord = null;
++      if (staffOnly) {
++        if (!staffIdentity.isStaff(guild, interaction.member)) return interaction.reply({ content: 'Staff Only tickets are for current staff members.', ephemeral: true });
++        try { staffRecord = staffIdentity.checkTicketId(guild.id, interaction.user.id, interaction.fields.getTextInputValue('staffId')); }
++        catch (err) { return interaction.reply({ content: err.message, ephemeral: true }); }
++      }
+       const answers = {};
+       for (const q of ticketType.questions) answers[q.id] = interaction.fields.getTextInputValue(q.id);
++      await interaction.deferReply({ ephemeral: true });
+ 
+       // Ticket channel is private to the opener only — NOT even Support can see it
+       // until they Claim it from the queue. This matches: only the info filled in
+@@ -707,17 +723,19 @@ module.exports = {
+         type: ChannelType.GuildText,
+         permissionOverwrites: [
+           { id: guild.roles.everyone, deny: ["ViewChannel"] },
++          { id: guild.client.user.id, allow: ["ViewChannel", "SendMessages", "ReadMessageHistory"] },
+           { id: interaction.user.id, allow: ["ViewChannel", "SendMessages"] }
+         ]
+       });
+ 
+-      const entry = db.add("tickets", { guildId: guild.id, channelId: channel.id, userId: interaction.user.id, type: typeKey, status: "open", answers, claimedBy: null, priority });
++      const entry = db.add("tickets", { guildId: guild.id, channelId: channel.id, userId: interaction.user.id, type: typeKey, status: "open", answers, claimedBy: null, priority, staffOnly, staffId: staffRecord?.staffId || null });
+ 
+       const introEmbed = new EmbedBuilder()
+         .setTitle(`🎫 ${ticketType.label}`)
+         .setDescription(`Hi ${interaction.user}, your ticket has been submitted. A staff member will claim it and be with you shortly.\nUse \`/close\` when this is resolved.`)
+         .addFields(
+           { name: "Priority", value: `${PRIORITY_EMOJI[priority]} ${priority.toUpperCase()}`, inline: true },
++          ...(staffRecord ? [{ name: 'Staff ID', value: staffRecord.staffId, inline: true }] : []),
+           ...ticketType.questions.map(q => ({ name: q.label.slice(0, 256), value: (answers[q.id] || "N/A").slice(0, 1000) }))
+         )
+         .setColor(structure.embedColor);
+@@ -732,7 +750,8 @@ module.exports = {
+           .setDescription(`Opened by: <@${interaction.user.id}>`)
+           .addFields(
+             { name: "Priority", value: `${PRIORITY_EMOJI[priority]} ${priority.toUpperCase()}`, inline: true },
+-            ...ticketType.questions.map(q => ({ name: q.label.slice(0, 256), value: (answers[q.id] || "N/A").slice(0, 1000) }))
++            ...(staffRecord ? [{ name: 'Staff ID', value: staffRecord.staffId, inline: true }] : []),
++          ...ticketType.questions.map(q => ({ name: q.label.slice(0, 256), value: (answers[q.id] || "N/A").slice(0, 1000) }))
+           )
+           .setColor(structure.embedColor)
+           .setFooter({ text: `Ticket ID: ${entry.id} — unclaimed` })
+@@ -744,7 +763,7 @@ module.exports = {
+       }
+ 
+       await logAction(guild, "🎫 Ticket Opened", `${ticketType.label} by <@${interaction.user.id}> in ${channel}`);
+-      return interaction.reply({ content: `✅ Ticket created: ${channel} — a Support staff member will claim it shortly.`, ephemeral: true });
++      return interaction.editReply({ content: `✅ Ticket created: ${channel} — a Support staff member will claim it shortly.` });
+     }
+ 
+     // ================= CLAIM TICKET =================
+diff --git a/package.json b/package.json
+index e788141..42c2ef0 100644
+--- a/package.json
++++ b/package.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "sarp-bot",
+-  "version": "1.0.0",
++  "version": "1.1.0",
+   "description": "Los Angeles RP - full server management bot",
+   "main": "index.js",
+   "type": "commonjs",
+diff --git a/tests/helpers/discord.js b/tests/helpers/discord.js
+new file mode 100644
+index 0000000..63574cc
+--- /dev/null
++++ b/tests/helpers/discord.js
+@@ -0,0 +1,55 @@
++const { Collection, ChannelType } = require('discord.js');
++let serial = 10000;
++function serialise(payload) {
++  return { ...payload, embeds: payload.embeds?.map(e => e.toJSON ? e.toJSON() : e), components: payload.components?.map(c => c.toJSON ? c.toJSON() : c) };
++}
++function createChannel(guild, data = {}) {
++  const store = new Collection();
++  const channel = {
++    id: String(++serial), name: data.name || 'test', type: data.type ?? ChannelType.GuildText, parentId: data.parent,
++    permissionOverwrites: { edit: async () => {} },
++    messages: { fetch: async query => {
++      if (typeof query === 'string') return store.get(query) || null;
++      const list = [...store.values()].reverse().filter(m => !query.before || Number(m.id) < Number(query.before)).slice(0, query.limit || 100);
++      return new Collection(list.map(m => [m.id, m]));
++    } },
++    send: async payload => channel.addMessage(payload, guild.client.user.id),
++    addMessage: (payload, authorId = 'human') => {
++      const json = serialise(payload);
++      const message = { id: String(++serial), author: { id: authorId }, embeds: json.embeds || [], components: json.components || [], pinned: false,
++        edit: async next => { const json = serialise(next); Object.assign(message, json); channel.sent.push(json); return message; },
++        delete: async () => { store.delete(message.id); },
++        pin: async () => { message.pinned = true; }
++      };
++      store.set(message.id, message); channel.sent.push(json); return message;
++    },
++    sent: [], store,
++    toString: () => `<#${channel.id}>`
++  };
++  guild.channels.cache.set(channel.id, channel);
++  return channel;
++}
++function createGuild(id = 'guild') {
++  const guild = { id, ownerId: 'owner', name: 'Test RP', client: { user: { id: 'bot' } },
++    roles: { cache: new Collection(), everyone: { id: 'everyone' } }, channels: { cache: new Collection() }, members: { cache: new Collection() }
++  };
++  guild.roles.create = async data => { const role = { ...data, id: String(++serial) }; guild.roles.cache.set(role.id, role); return role; };
++  guild.channels.create = async data => createChannel(guild, data);
++  guild.members.fetch = async id => guild.members.cache.get(id) || null;
++  return guild;
++}
++function interaction(guild, id, kind = 'Button', userId = 'owner') {
++  const member = guild.members.cache.get(userId) || { id: userId, roles: { cache: new Collection() }, permissions: { has: () => userId === 'owner' } };
++  const result = { customId: id, guild, user: { id: userId, username: userId, tag: userId }, member, values: [],
++    reply: async payload => { result.payload = payload; result.replied = true; },
++    update: async payload => { result.payload = payload; },
++    showModal: async modal => { result.modal = modal; },
++    deferReply: async () => { result.deferred = true; },
++    editReply: async payload => { result.payload = payload; },
++    followUp: async payload => { result.payload = payload; },
++    isRepliable: () => true
++  };
++  for (const name of ['Button', 'StringSelectMenu', 'UserSelectMenu', 'RoleSelectMenu', 'ModalSubmit', 'ChatInputCommand']) result[`is${name}`] = () => name === kind;
++  return result;
++}
++module.exports = { createGuild, createChannel, interaction };
+diff --git a/tests/remaining-features.test.js b/tests/remaining-features.test.js
+index 1514cfc..e6def38 100644
+--- a/tests/remaining-features.test.js
++++ b/tests/remaining-features.test.js
+@@ -7,9 +7,10 @@ const structure = require('../config/structure');
+ const db = require('../utils/dataStore');
+ const handler = require('../events/interactionCreate');
+ const roles = require('../utils/roles');
++const mocks = require('./helpers/discord');
+ 
+ // Keep test records in memory and reject any accidental access to retired stores.
+-const allowed = new Set(['tickets', 'applications', 'partnerships', 'suggestions', 'scheduledAnnouncements', 'offices', 'settings', 'staffProfiles']);
++const allowed = new Set(['tickets', 'applications', 'partnerships', 'suggestions', 'scheduledAnnouncements', 'offices', 'settings', 'staffProfiles', 'staffIdentities']);
+ const records = {};
+ db.load = store => {
+   assert.ok(allowed.has(store), `Unexpected store: ${store}`);
+@@ -52,26 +53,7 @@ test('all retained commands and events load; slash payloads validate', () => {
+ });
+ 
+ test('server setup builds valid dashboards and retains ticket/application panels', async () => {
+-  const sent = [];
+-  let serial = 0;
+-  const guild = { id: 'guild', roles: { cache: new Collection(), everyone: { id: 'everyone' } }, channels: { cache: new Collection() } };
+-  guild.roles.create = async data => {
+-    const role = { ...data, id: String(++serial) };
+-    guild.roles.cache.set(role.id, role);
+-    return role;
+-  };
+-  guild.channels.create = async data => {
+-    const channel = {
+-      ...data, id: String(++serial), parentId: data.parent,
+-      permissionOverwrites: { edit: async () => {} },
+-      send: async payload => {
+-        const json = { ...payload, embeds: payload.embeds?.map(e => e.toJSON()), components: payload.components?.map(c => c.toJSON()) };
+-        sent.push({ channel: data.name, ...json });
+-      }
+-    };
+-    guild.channels.cache.set(channel.id, channel);
+-    return channel;
+-  };
++  const guild = mocks.createGuild();
+   const built = await require('../utils/serverBuilder').buildServer(guild);
+   const allChannels = Object.values(structure.categories).flatMap(category => category.channels);
+   assert.equal(new Set(Object.values(built).map(c => c.id)).size, allChannels.length);
+@@ -83,13 +65,14 @@ test('server setup builds valid dashboards and retains ticket/application panels
+   assert.ok(!structure.categories.STAFF_TRAINING);
+   assert.equal(guild.roles.cache.size, Object.keys(structure.roles).length);
+   assert.ok(!structure.categories.HUMAN_RESOURCES && !structure.categories.INTERNAL_AFFAIRS);
++  const sent = [...guild.channels.cache.values()].flatMap(c => c.sent);
+   const hub = sent.find(p => p.embeds?.[0]?.title?.includes('Control Hub'));
+   assert.ok(hub);
+   const ids = hub.components.flatMap(row => {
+     assert.ok(row.components.length > 0 && row.components.length <= 5);
+     return row.components.map(c => c.custom_id);
+   });
+-  for (const id of ['dash_tickets', 'dash_applications', 'dash_promote', 'dash_demote', 'dash_offices']) assert.ok(ids.includes(id));
++  for (const id of ['dash_tickets', 'dash_applications', 'dash_promote', 'dash_demote', 'dash_offices', 'staffdm_open', 'staffids_manage', 'staffguide_manage']) assert.ok(ids.includes(id));
+   assert.ok(!ids.some(id => /loa|blacklist|shifts|moderation|departments|performance|terminate|editbot|mass_delete|activity_check|dash_dm/.test(id)));
+   assert.ok(sent.some(p => p.components?.some(row => row.components.some(c => c.custom_id === 'ticket_open'))));
+   assert.ok(sent.some(p => p.components?.some(row => row.components.some(c => c.custom_id === 'app_open'))));
+@@ -108,19 +91,17 @@ test('ticket menu drops a saved blacklist appeal override and keeps custom ticke
+   db.save('settings', []);
+ });
+ 
+-test('staff guide posts valid messages without removed case controls', async () => {
+-  const sent = [];
+-  const i = interaction('');
++test('staff guide publishes stable panels and ID controls', async () => {
++  const guild = mocks.createGuild('guide-test');
++  const channel = mocks.createChannel(guild, { name: 'staff-guide' });
++  const i = mocks.interaction(guild, '');
+   i.options = { getString: () => null };
+-  i.guild.channels.cache.set('guide', { name: 'staff-guide', send: async payload => {
+-    sent.push(payload);
+-    for (const embed of payload.embeds) embed.toJSON();
+-    return { pin: async () => {} };
+-  } });
+   await require('../commands/staffguide').execute(i);
+-  assert.equal(sent.length, 4);
+-  assert.ok(sent.every(p => !p.components?.length));
+-  assert.ok(!/infraction|shift|hr_open_case|ia_open_case/i.test(JSON.stringify(sent)));
++  await require('../commands/staffguide').execute(i);
++  assert.equal(channel.store.size, 4);
++  const main = [...channel.store.values()].find(m => m.embeds[0].title === '📘 Staff Guide');
++  assert.ok(main.components.flatMap(r => r.components).some(b => b.custom_id === 'staffid_get'));
++  assert.ok(!/hr_open_case|ia_open_case/.test(JSON.stringify([...channel.store.values()])));
+ });
+ 
+ test('controls on old Discord messages report removal without running a retired system', async () => {
+diff --git a/tests/staff-tools.test.js b/tests/staff-tools.test.js
+new file mode 100644
+index 0000000..8e067cc
+--- /dev/null
++++ b/tests/staff-tools.test.js
+@@ -0,0 +1,271 @@
++const { test, beforeEach } = require('node:test');
++const assert = require('node:assert/strict');
++const { Collection } = require('discord.js');
++const fs = require('node:fs');
++const os = require('node:os');
++const path = require('node:path');
++const { execFileSync } = require('node:child_process');
++const mocks = require('./helpers/discord');
++const db = require('../utils/dataStore');
++const ids = require('../utils/staffIdentity');
++const guides = require('../utils/staffGuide');
++const { publishPanel } = require('../utils/managedPanels');
++const handler = require('../events/interactionCreate');
++const structure = require('../config/structure');
++let data;
++beforeEach(() => { data = {}; });
++db.load = key => data[key] ||= [];
++db.save = (key, value) => { data[key] = value; };
++db.find = (key, pred) => db.load(key).filter(pred);
++db.add = (key, record) => { const row = { ...record, id: `${key}_${db.load(key).length + 1}` }; db.load(key).push(row); return row; };
++db.update = (key, id, updates) => { const row = db.load(key).find(r => r.id === id); if (!row) return null; Object.assign(row, updates); return row; };
++function member(guild, userId, roleKey = 'MODERATOR') {
++  const role = { id: roleKey, name: structure.roles[roleKey].name, position: 1 };
++  guild.roles.cache.set(role.id, role);
++  const person = { id: userId, user: { id: userId, bot: false }, roles: { cache: new Collection([[role.id, role]]) }, permissions: { has: () => false }, send: async () => {} };
++  guild.members.cache.set(userId, person); return person;
++}
++function fields(i, values) { i.fields = { getTextInputValue: key => values[key] || '' }; return i; }
++
++test('email registration normalises addresses, rejects collisions, and preserves assigned IDs on edits', () => {
++  ids.registerEmail('g', 'one', ' FIRST@Example.COM ', 'owner');
++  const first = ids.claimIdentity('g', 'one', 'first@example.com');
++  assert.equal(first.staffId, 'LA-STAFF-0001');
++  assert.equal(ids.claimIdentity('g', 'one', 'FIRST@example.com').staffId, first.staffId);
++  assert.throws(() => ids.registerEmail('g', 'two', 'first@example.com', 'owner'), /already assigned/);
++  ids.registerEmail('g', 'one', 'updated@example.com', 'owner');
++  assert.equal(ids.claimIdentity('g', 'one', 'updated@example.com').staffId, first.staffId);
++  assert.throws(() => ids.claimIdentity('g', 'one', 'first@example.com'), /not registered/);
++  ids.registerEmail('g', 'two', 'second@example.com', 'owner');
++  assert.equal(ids.claimIdentity('g', 'two', 'second@example.com').staffId, 'LA-STAFF-0002');
++});
++
++test('staff identities cannot be claimed by another member or used across guilds', () => {
++  ids.registerEmail('g', 'one', 'one@example.com', 'owner');
++  assert.throws(() => ids.claimIdentity('g', 'two', 'one@example.com'), /not registered/);
++  assert.throws(() => ids.claimIdentity('other', 'one', 'one@example.com'), /not registered/);
++  const record = ids.claimIdentity('g', 'one', 'one@example.com');
++  assert.throws(() => ids.checkTicketId('g', 'two', record.staffId), /own staff ID/);
++  assert.throws(() => ids.checkTicketId('other', 'one', record.staffId), /own staff ID/);
++  assert.equal(ids.checkTicketId('g', 'one', record.staffId.toLowerCase()).userId, 'one');
++});
++
++test('ID records survive a real datastore reload and a new Node process', () => {
++  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sarp-identities-'));
++  const cwd = path.join(__dirname, '..');
++  const env = { ...process.env, SARP_DATA_DIR: directory };
++  try {
++    const create = "const s=require('./utils/staffIdentity');s.registerEmail('persist','member','staff@example.com','owner');process.stdout.write(s.claimIdentity('persist','member','staff@example.com').staffId)";
++    const claim = "const s=require('./utils/staffIdentity');process.stdout.write(s.claimIdentity('persist','member','staff@example.com').staffId)";
++    assert.equal(execFileSync(process.execPath, ['-e', create], { cwd, env, encoding: 'utf8' }), 'LA-STAFF-0001');
++    assert.equal(execFileSync(process.execPath, ['-e', claim], { cwd, env, encoding: 'utf8' }), 'LA-STAFF-0001');
++    assert.ok(fs.existsSync(path.join(directory, 'staff_identities.json')));
++  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
++});
++
++test('owner controls reject non-owner staff at each modal/select/button stage', async () => {
++  const guild = mocks.createGuild(); member(guild, 'mod');
++  for (const [id, kind] of [['staffdm_open','Button'], ['staffdm_target','UserSelectMenu'], ['staffdm_send::target','ModalSubmit'], ['staffids_manage','Button'], ['staffids_target','UserSelectMenu'], ['staffids_save::mod','ModalSubmit'], ['staffguide_manage','Button'], ['staffguide_add','Button'], ['staffguide_select::remove','StringSelectMenu'], ['staffguide_save::edit::id-help','ModalSubmit']]) {
++    const i = mocks.interaction(guild, id, kind, 'mod');
++    await handler._handle(i, {});
++    assert.match(i.payload.content, /Only the Owner and Co-Owner/);
++    assert.ok(!i.modal);
++  }
++  assert.equal(db.load('staffIdentities').length, 0);
++});
++
++test('co-owner controls use registered role IDs even after a role is renamed', async () => {
++  const guild = mocks.createGuild(); const co = member(guild, 'co', 'CO_OWNER');
++  assert.ok(ids.isOwnerTeam(guild, co));
++  guild.roles.cache.get('CO_OWNER').name = 'Renamed Co-Owner';
++  assert.ok(ids.isOwnerTeam(guild, co));
++  const i = mocks.interaction(guild, 'staffids_manage', 'Button', 'co');
++  await handler._handle(i, {});
++  assert.equal(i.payload.embeds[0].toJSON().title, 'Staff Emails / IDs');
++});
++
++test('bot DMs send only to the selected server member and report delivery failures', async () => {
++  const guild = mocks.createGuild(); const target = member(guild, 'target');
++  const sent = [];
++  target.send = async payload => sent.push(payload);
++  const log = mocks.createChannel(guild, { name: 'bot-logs' });
++  const pick = mocks.interaction(guild, 'staffdm_target', 'UserSelectMenu'); pick.values = ['target'];
++  await handler._handle(pick, {});
++  assert.equal(pick.modal.toJSON().custom_id, 'staffdm_send::target');
++  const i = fields(mocks.interaction(guild, 'staffdm_send::target', 'ModalSubmit'), { message: 'Hello staff member!' });
++  await handler._handle(i, {});
++  assert.equal(sent[0].content, 'Hello staff member!');
++  assert.deepEqual(sent[0].allowedMentions, { parse: [] });
++  assert.match(i.payload.content, /was sent/);
++  assert.ok(!JSON.stringify(log.sent).includes('Hello staff member!'));
++  target.send = async () => { throw new Error('Cannot send messages to this user'); };
++  const failed = fields(mocks.interaction(guild, 'staffdm_send::target', 'ModalSubmit'), { message: 'Test failure' });
++  await handler._handle(failed, {});
++  assert.match(failed.payload.content, /could not deliver/);
++  assert.equal(log.store.size, 1);
++});
++
++test('registered staff retrieve the same ID twice; non-staff cannot claim one', async () => {
++  const guild = mocks.createGuild(); member(guild, 'staff');
++  ids.registerEmail(guild.id, 'staff', 'staff@example.com', 'owner');
++  for (let n = 0; n < 2; n++) {
++    const i = fields(mocks.interaction(guild, 'staffid_claim', 'ModalSubmit', 'staff'), { email: 'staff@example.com' });
++    await handler._handle(i, {});
++    assert.match(i.payload.content, /LA-STAFF-0001/);
++    assert.ok(i.payload.ephemeral);
++  }
++  ids.registerEmail(guild.id, 'guest', 'guest@example.com', 'owner');
++  const guest = fields(mocks.interaction(guild, 'staffid_claim', 'ModalSubmit', 'guest'), { email: 'guest@example.com' });
++  await handler._handle(guest, {});
++  assert.match(guest.payload.content, /current staff/);
++  assert.equal(ids.getIdentity(guild.id, 'guest').staffId, null);
++});
++
++test('staff-only ticket category lists the requested reasons and modal includes the ID hint', async () => {
++  const guild = mocks.createGuild(); member(guild, 'staff');
++  const i = mocks.interaction(guild, 'ticket_open', 'Button', 'staff');
++  await handler._handle(i, {});
++  assert.ok(i.payload.components[0].toJSON().components[0].options.some(o => o.value === 'STAFF_ONLY'));
++  const group = mocks.interaction(guild, 'ticket_type_select', 'StringSelectMenu', 'staff'); group.values = ['STAFF_ONLY'];
++  await handler._handle(group, {});
++  assert.equal(group.payload.components[0].toJSON().components[0].options.length, 7);
++  for (const type of Object.keys(structure.staffTicketTypes)) {
++    const priority = mocks.interaction(guild, `ticket_priority_intake::${type}`, 'StringSelectMenu', 'staff'); priority.values = ['normal'];
++    await handler._handle(priority, {});
++    const json = priority.modal.toJSON();
++    assert.ok(json.components.length <= 5);
++    assert.equal(json.components[0].components[0].custom_id, 'staffId');
++    assert.equal(json.components[0].components[0].placeholder, 'Go to staff guide to get your staff ID');
++  }
++});
++
++test('staff ticket creation rejects missing/wrong/borrowed IDs and nonstaff before creating channels', async () => {
++  const guild = mocks.createGuild(); member(guild, 'staff'); member(guild, 'other');
++  ids.registerEmail(guild.id, 'staff', 'staff@example.com', 'owner');
++  ids.registerEmail(guild.id, 'other', 'other@example.com', 'owner');
++  const own = ids.claimIdentity(guild.id, 'staff', 'staff@example.com').staffId;
++  const borrowed = ids.claimIdentity(guild.id, 'other', 'other@example.com').staffId;
++  for (const wrong of ['', 'LA-STAFF-9999', borrowed]) {
++    const i = fields(mocks.interaction(guild, 'ticket_intake::STAFF_REPORT::normal', 'ModalSubmit', 'staff'), { staffId: wrong });
++    await handler._handle(i, {});
++    assert.match(i.payload.content, /own staff ID/);
++  }
++  const guest = fields(mocks.interaction(guild, 'ticket_intake::STAFF_REPORT::normal', 'ModalSubmit', 'guest'), { staffId: own });
++  await handler._handle(guest, {});
++  assert.match(guest.payload.content, /current staff/);
++  assert.equal(guild.channels.cache.size, 0);
++  assert.equal(db.load('tickets').length, 0);
++});
++
++test('a verified staff ticket records the ID, stays private, and enters the existing support queue', async () => {
++  const guild = mocks.createGuild(); member(guild, 'staff');
++  const queue = mocks.createChannel(guild, { name: 'ticket-queue' });
++  ids.registerEmail(guild.id, 'staff', 'staff@example.com', 'owner');
++  const staffId = ids.claimIdentity(guild.id, 'staff', 'staff@example.com').staffId;
++  let created;
++  const originalCreate = guild.channels.create;
++  guild.channels.create = async payload => { created = payload; return originalCreate(payload); };
++  const i = fields(mocks.interaction(guild, 'ticket_intake::STAFF_HOURS::normal', 'ModalSubmit', 'staff'), { staffId, q1: 'Missing two hours', q2: 'Details', q3: 'none' });
++  await handler._handle(i, {});
++  assert.match(i.payload.content, /Ticket created/);
++  assert.ok(i.deferred);
++  const ticket = db.load('tickets')[0];
++  assert.equal(ticket.staffId, staffId); assert.ok(ticket.staffOnly);
++  assert.ok(created.permissionOverwrites.some(p => p.id.id === 'everyone' && p.deny.includes('ViewChannel')));
++  assert.ok(created.permissionOverwrites.some(p => p.id === 'bot'));
++  assert.ok(queue.sent[0].embeds[0].fields.some(f => f.name === 'Staff ID' && f.value === staffId));
++  assert.equal(queue.sent[0].components[0].components[0].custom_id, `ticket_claim_${ticket.id}`);
++});
++
++test('ordinary support tickets still open without a staff ID', async () => {
++  const guild = mocks.createGuild(); mocks.createChannel(guild, { name: 'ticket-queue' });
++  const i = fields(mocks.interaction(guild, 'ticket_intake::SUPPORT::normal', 'ModalSubmit', 'guest'), { q1: 'Player', q2: 'Need assistance' });
++  await handler._handle(i, {});
++  assert.match(i.payload.content, /Ticket created/);
++  assert.equal(db.load('tickets')[0].staffId, null);
++});
++
++test('info buttons add/edit/remove and remain within Discord component limits', () => {
++  const first = guides.changeInfoButton('g', 'add', null, 'New policy', 'Read this policy.');
++  const added = first.buttons.at(-1);
++  assert.ok(added.id);
++  guides.changeInfoButton('g', 'edit', added.id, 'Updated policy', 'Updated information.');
++  assert.equal(guides.getGuideConfig('g').buttons.at(-1).content, 'Updated information.');
++  guides.changeInfoButton('g', 'remove', added.id);
++  assert.ok(!guides.getGuideConfig('g').buttons.some(b => b.id === added.id));
++  assert.throws(() => guides.changeInfoButton('g', 'edit', 'missing', 'Label', 'Info'), /no longer exists/);
++  assert.throws(() => guides.changeInfoButton('g', 'add', null, 'L'.repeat(81), 'Info'), /1–80/);
++  while (guides.getGuideConfig('g').buttons.length < guides.MAX_INFO_BUTTONS) guides.changeInfoButton('g', 'add', null, 'More help', 'Details');
++  assert.throws(() => guides.changeInfoButton('g', 'add', null, 'Too many', 'Info'), /up to 19/);
++  const json = guides.buildGuideMessages('g')[0].payload.components.map(r => r.toJSON());
++  assert.ok(json.length <= 5); assert.ok(json.every(r => r.components.length <= 5));
++});
++
++test('submitting guide edits replaces exactly one guide and dashboard, while retaining ID records', async () => {
++  const guild = mocks.createGuild();
++  const guide = mocks.createChannel(guild, { name: 'staff-guide' });
++  const dash = mocks.createChannel(guild, { name: 'staff-dashboard' });
++  await guides.publishStaffGuide(guild);
++  await require('../utils/dashboard').publishDashboard(guild);
++  const oldGuide = [...guide.store.keys()][0]; const oldDash = [...dash.store.keys()][0];
++  ids.registerEmail(guild.id, 'owner', 'owner@example.com', 'owner');
++  const stable = ids.claimIdentity(guild.id, 'owner', 'owner@example.com').staffId;
++  const edit = fields(mocks.interaction(guild, 'staffguide_save::add', 'ModalSubmit'), { label: 'New Instructions', info: 'These instructions are new.' });
++  await handler._handle(edit, {});
++  assert.match(edit.payload.content, /Saved/);
++  assert.equal(guide.store.size, 4); assert.equal(dash.store.size, 1);
++  assert.ok(!guide.store.has(oldGuide)); assert.ok(!dash.store.has(oldDash));
++  const main = [...guide.store.values()].find(m => m.embeds[0].title === '📘 Staff Guide');
++  assert.ok(main.components.flatMap(r => r.components).some(b => b.label === 'New Instructions'));
++  assert.equal(ids.claimIdentity(guild.id, 'owner', 'owner@example.com').staffId, stable);
++});
++
++test('panel migration removes old bot duplicates but keeps member messages', async () => {
++  const guild = mocks.createGuild(); const channel = mocks.createChannel(guild, { name: 'staff-dashboard' });
++  const payload = { embeds: [{ title: 'Example Panel' }] };
++  channel.addMessage(payload, 'bot'); channel.addMessage(payload, 'bot');
++  const human = channel.addMessage(payload, 'human');
++  await publishPanel(guild, channel, 'example', payload, m => m.embeds[0]?.title === 'Example Panel');
++  await Promise.all([publishPanel(guild, channel, 'example', payload, m => m.embeds[0]?.title === 'Example Panel'), publishPanel(guild, channel, 'example', payload, m => m.embeds[0]?.title === 'Example Panel')]);
++  assert.equal(channel.store.size, 2); assert.ok(channel.store.has(human.id));
++});
++
++test('owner registration through the dashboard binds the email to the selected member', async () => {
++  const guild = mocks.createGuild(); member(guild, 'staff');
++  const pick = mocks.interaction(guild, 'staffids_target', 'UserSelectMenu'); pick.values = ['staff'];
++  await handler._handle(pick, {});
++  assert.equal(pick.modal.toJSON().custom_id, 'staffids_save::staff');
++  const save = fields(mocks.interaction(guild, 'staffids_save::staff', 'ModalSubmit'), { email: 'staff@example.com' });
++  await handler._handle(save, {});
++  assert.match(save.payload.content, /Email saved/);
++  assert.equal(ids.getIdentity(guild.id, 'staff').email, 'staff@example.com');
++  assert.equal(ids.getIdentity(guild.id, 'staff').staffId, null);
++});
++
++test('information button clicks show only their configured information privately', async () => {
++  const guild = mocks.createGuild(); member(guild, 'staff');
++  const i = mocks.interaction(guild, 'staffinfo_id-help', 'Button', 'staff');
++  await handler._handle(i, {});
++  assert.equal(i.payload.embeds[0].toJSON().title, 'How Staff IDs Work');
++  assert.ok(i.payload.ephemeral);
++  assert.equal(db.load('staffIdentities').length, 0);
++});
++
++test('guide edit and remove controls update both published panels without duplicate messages', async () => {
++  const guild = mocks.createGuild();
++  const channel = mocks.createChannel(guild, { name: 'staff-guide' });
++  const dashboard = mocks.createChannel(guild, { name: 'staff-dashboard' });
++  await guides.publishStaffGuide(guild);
++  await require('../utils/dashboard').publishDashboard(guild);
++  const edit = fields(mocks.interaction(guild, 'staffguide_save::edit::id-help', 'ModalSubmit'), { label: 'ID Instructions', info: 'Updated staff ID details.' });
++  await handler._handle(edit, {});
++  const show = mocks.interaction(guild, 'staffinfo_id-help');
++  await handler._handle(show, {});
++  assert.equal(show.payload.embeds[0].toJSON().description, 'Updated staff ID details.');
++  const remove = mocks.interaction(guild, 'staffguide_select::remove', 'StringSelectMenu'); remove.values = ['id-help'];
++  await handler._handle(remove, {});
++  assert.ok(!guides.getGuideConfig(guild.id).buttons.some(b => b.id === 'id-help'));
++  assert.equal(channel.store.size, 4); assert.equal(dashboard.store.size, 1);
++  const main = [...channel.store.values()].find(m => m.embeds[0].title === '📘 Staff Guide');
++  assert.ok(main.components.flatMap(r => r.components).some(b => b.custom_id === 'staffid_get'));
++});
+diff --git a/utils/dashboard.js b/utils/dashboard.js
+new file mode 100644
+index 0000000..154d670
+--- /dev/null
++++ b/utils/dashboard.js
+@@ -0,0 +1,43 @@
++const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
++const structure = require('../config/structure');
++const { publishPanel } = require('./managedPanels');
++function buildDashboard() {
++    const embed = new EmbedBuilder()
++      .setTitle(`${structure.botName} — Control Hub`)
++      .setDescription("Manage tickets, applications, rules, announcements, partnerships, staff ranks, and offices.")
++      .setColor(structure.embedColor)
++      .setFooter({ text: `${structure.botName} | Dashboard` })
++      .setTimestamp();
++
++    const row1 = new ActionRowBuilder().addComponents(
++      new ButtonBuilder().setCustomId("dash_welcome").setLabel("Welcome System").setStyle(ButtonStyle.Primary),
++      new ButtonBuilder().setCustomId("dash_tickets").setLabel("Ticket System").setStyle(ButtonStyle.Primary),
++      new ButtonBuilder().setCustomId("dash_roles").setLabel("Auto Roles").setStyle(ButtonStyle.Primary),
++      new ButtonBuilder().setCustomId("dash_applications").setLabel("Staff Applications").setStyle(ButtonStyle.Primary),
++      new ButtonBuilder().setCustomId("dash_app_results").setLabel("Application Results").setStyle(ButtonStyle.Primary)
++    );
++    const row2 = new ActionRowBuilder().addComponents(
++      new ButtonBuilder().setCustomId("dash_logging").setLabel("Logging").setStyle(ButtonStyle.Secondary),
++      new ButtonBuilder().setCustomId("dash_announcements").setLabel("Announcements").setStyle(ButtonStyle.Success),
++      new ButtonBuilder().setCustomId("dash_promote").setLabel("Promote").setStyle(ButtonStyle.Success),
++      new ButtonBuilder().setCustomId("dash_demote").setLabel("Demote").setStyle(ButtonStyle.Danger)
++    );
++    const row3 = new ActionRowBuilder().addComponents(
++      new ButtonBuilder().setCustomId("dash_partnerships").setLabel("Partnerships").setStyle(ButtonStyle.Secondary),
++      new ButtonBuilder().setCustomId("dash_edit").setLabel("Edit Rules/Announcements").setStyle(ButtonStyle.Secondary)
++    );
++    const row4 = new ActionRowBuilder().addComponents(
++      new ButtonBuilder().setCustomId("dash_offices").setLabel("Offices").setStyle(ButtonStyle.Secondary),
++      new ButtonBuilder().setCustomId("staffdm_open").setLabel("Send Bot DM").setStyle(ButtonStyle.Primary),
++      new ButtonBuilder().setCustomId("staffids_manage").setLabel("Staff Emails / IDs").setStyle(ButtonStyle.Primary),
++      new ButtonBuilder().setCustomId("staffguide_manage").setLabel("Staff Guide Settings").setStyle(ButtonStyle.Secondary)
++    );
++
++    return { embeds: [embed], components: [row1, row2, row3, row4] };
++}
++async function publishDashboard(guild, { replace = false } = {}) {
++  const channel = guild.channels.cache.find(c => c.name.endsWith('staff-dashboard'));
++  if (!channel) throw new Error('Run /setup first to create the staff-dashboard channel.');
++  return publishPanel(guild, channel, 'dashboard', buildDashboard(), m => m.embeds.some(e => e.title?.endsWith(' — Control Hub')), { replace });
++}
++module.exports = { buildDashboard, publishDashboard };
+diff --git a/utils/dataStore.js b/utils/dataStore.js
+index 9f4f114..dcaa58b 100644
+--- a/utils/dataStore.js
++++ b/utils/dataStore.js
+@@ -1,11 +1,12 @@
+ const fs = require("fs");
+ const path = require("path");
+ 
+-const DATA_DIR = path.join(__dirname, "..", "data");
++const DATA_DIR = process.env.SARP_DATA_DIR || path.join(__dirname, "..", "data");
+ if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+ 
+ const FILES = {
+   tickets: "tickets.json",
++  staffIdentities: "staff_identities.json",
+   applications: "applications.json",
+   partnerships: "partnerships.json",
+   suggestions: "suggestions.json",
+@@ -30,7 +31,10 @@ function load(store) {
+ }
+ 
+ function save(store, data) {
+-  fs.writeFileSync(filePath(store), JSON.stringify(data, null, 2));
++  const destination = filePath(store);
++  const temporary = `${destination}.tmp`;
++  fs.writeFileSync(temporary, JSON.stringify(data, null, 2));
++  fs.renameSync(temporary, destination);
+ }
+ 
+ function add(store, entry) {
+diff --git a/utils/managedPanels.js b/utils/managedPanels.js
+new file mode 100644
+index 0000000..19783e2
+--- /dev/null
++++ b/utils/managedPanels.js
+@@ -0,0 +1,42 @@
++const db = require('./dataStore');
++const locks = new Map();
++
++// Serialize publication per panel so simultaneous setup/editor requests cannot duplicate it.
++async function publishPanel(guild, channel, key, payload, matches, { replace = false, pin = false } = {}) {
++  const lockKey = `${guild.id}:${key}`;
++  const prior = locks.get(lockKey) || Promise.resolve();
++  const next = prior.catch(() => {}).then(async () => {
++    const botId = guild.client.user.id;
++    const settingsKey = `panel_${guild.id}_${key}`;
++    const registered = db.find('settings', r => r.key === settingsKey)[0]?.value;
++    const found = new Map();
++    let before;
++    // Also migrate older bot-authored panels which predate the message registry.
++    for (;;) {
++      const batch = await channel.messages.fetch({ limit: 100, ...(before ? { before } : {}) });
++      if (!batch.size) break;
++      for (const message of batch.values()) {
++        if (message.author.id === botId && (matches(message) || (registered?.channelId === channel.id && registered.messageId === message.id))) found.set(message.id, message);
++      }
++      const last = batch.last().id;
++      if (last === before || batch.size < 100) break;
++      before = last;
++    }
++    let current = found.get(registered?.messageId) || found.values().next().value;
++    const outgoing = { content: '', components: [], ...payload, allowedMentions: { parse: [] } };
++    if (current && !replace) current = await current.edit(outgoing);
++    else current = await channel.send(outgoing);
++    // Publish first, then remove obsolete bot panels. Never delete member posts.
++    for (const message of found.values()) if (message.id !== current.id) await message.delete();
++    const settings = db.load('settings');
++    let record = settings.find(r => r.key === settingsKey);
++    if (!record) { record = { id: `settings_${settingsKey}`, key: settingsKey }; settings.push(record); }
++    record.value = { channelId: channel.id, messageId: current.id };
++    db.save('settings', settings);
++    if (pin && !current.pinned) await current.pin().catch(() => {});
++    return current;
++  });
++  locks.set(lockKey, next);
++  try { return await next; } finally { if (locks.get(lockKey) === next) locks.delete(lockKey); }
++}
++module.exports = { publishPanel };
+diff --git a/utils/serverBuilder.js b/utils/serverBuilder.js
+index 4e9dd98..d7a4438 100644
+--- a/utils/serverBuilder.js
++++ b/utils/serverBuilder.js
+@@ -1,6 +1,9 @@
+ const { ChannelType, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require("discord.js");
+ const structure = require("../config/structure.js");
+ const { logAction } = require("./logger.js");
++const { publishPanel } = require("./managedPanels");
++const { publishDashboard } = require("./dashboard");
++const { publishStaffGuide } = require("./staffGuide");
+ 
+ async function buildServer(guild) {
+   const createdRoles = {};
+@@ -36,6 +39,7 @@ async function buildServer(guild) {
+         });
+       }
+       if (chData.locked) await channel.permissionOverwrites.edit(guild.roles.everyone, { ViewChannel: false });
++      await channel.permissionOverwrites.edit(guild.client.user.id, { ViewChannel: true, SendMessages: true, ReadMessageHistory: true });
+       createdChannels[chData.key] = channel;
+     }
+ 
+@@ -69,35 +73,7 @@ async function buildServer(guild) {
+   // 5. Dashboard
+   const dashboardChannel = createdChannels["DASHBOARD"];
+   if (dashboardChannel) {
+-    const embed = new EmbedBuilder()
+-      .setTitle(`${structure.botName} — Control Hub`)
+-      .setDescription("Manage tickets, applications, rules, announcements, partnerships, staff ranks, and offices.")
+-      .setColor(structure.embedColor)
+-      .setFooter({ text: `${structure.botName} | Dashboard` })
+-      .setTimestamp();
+-
+-    const row1 = new ActionRowBuilder().addComponents(
+-      new ButtonBuilder().setCustomId("dash_welcome").setLabel("Welcome System").setStyle(ButtonStyle.Primary),
+-      new ButtonBuilder().setCustomId("dash_tickets").setLabel("Ticket System").setStyle(ButtonStyle.Primary),
+-      new ButtonBuilder().setCustomId("dash_roles").setLabel("Auto Roles").setStyle(ButtonStyle.Primary),
+-      new ButtonBuilder().setCustomId("dash_applications").setLabel("Staff Applications").setStyle(ButtonStyle.Primary),
+-      new ButtonBuilder().setCustomId("dash_app_results").setLabel("Application Results").setStyle(ButtonStyle.Primary)
+-    );
+-    const row2 = new ActionRowBuilder().addComponents(
+-      new ButtonBuilder().setCustomId("dash_logging").setLabel("Logging").setStyle(ButtonStyle.Secondary),
+-      new ButtonBuilder().setCustomId("dash_announcements").setLabel("Announcements").setStyle(ButtonStyle.Success),
+-      new ButtonBuilder().setCustomId("dash_promote").setLabel("Promote").setStyle(ButtonStyle.Success),
+-      new ButtonBuilder().setCustomId("dash_demote").setLabel("Demote").setStyle(ButtonStyle.Danger)
+-    );
+-    const row3 = new ActionRowBuilder().addComponents(
+-      new ButtonBuilder().setCustomId("dash_partnerships").setLabel("Partnerships").setStyle(ButtonStyle.Secondary),
+-      new ButtonBuilder().setCustomId("dash_edit").setLabel("Edit Rules/Announcements").setStyle(ButtonStyle.Secondary)
+-    );
+-    const row4 = new ActionRowBuilder().addComponents(
+-      new ButtonBuilder().setCustomId("dash_offices").setLabel("Offices").setStyle(ButtonStyle.Secondary)
+-    );
+-
+-    await dashboardChannel.send({ embeds: [embed], components: [row1, row2, row3, row4] });
++    await publishDashboard(guild);
+   }
+ 
+   // 6. Ticket panel
+@@ -110,7 +86,7 @@ async function buildServer(guild) {
+     const menu = new ActionRowBuilder().addComponents(
+       new ButtonBuilder().setCustomId("ticket_open").setLabel("Open Ticket").setEmoji("🎫").setStyle(ButtonStyle.Primary)
+     );
+-    await ticketChannel.send({ embeds: [embed], components: [menu] });
++    await publishPanel(guild, ticketChannel, "ticket-panel", { embeds: [embed], components: [menu] }, m => m.embeds.some(e => e.title === "Open a Ticket"));
+   }
+ 
+   // 7. Application panel
+@@ -123,9 +99,11 @@ async function buildServer(guild) {
+     const menu = new ActionRowBuilder().addComponents(
+       new ButtonBuilder().setCustomId("app_open").setLabel("Apply").setEmoji("📄").setStyle(ButtonStyle.Primary)
+     );
+-    await appChannel.send({ embeds: [embed], components: [menu] });
++    await publishPanel(guild, appChannel, "application-panel", { embeds: [embed], components: [menu] }, m => m.embeds.some(e => e.title === "Staff Applications"));
+   }
+ 
++  await publishStaffGuide(guild);
++
+   await logAction(guild, "🛠️ Server setup complete", `${structure.botName} — Los Angeles RP structure built.`);
+ 
+   return createdChannels;
+diff --git a/utils/staffGuide.js b/utils/staffGuide.js
+new file mode 100644
+index 0000000..f137efc
+--- /dev/null
++++ b/utils/staffGuide.js
+@@ -0,0 +1,66 @@
++const { randomBytes } = require('node:crypto');
++const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
++const db = require('./dataStore');
++const structure = require('../config/structure');
++const { publishPanel } = require('./managedPanels');
++const MAX_INFO_BUTTONS = 19;
++const DEFAULT_BUTTONS = [
++  { id: 'id-help', label: 'How Staff IDs Work', content: 'Click Get Staff ID and enter the staff email registered to your Discord account by the Owner or Co-Owner. Your ID stays the same every time. No email inbox access is needed.' },
++  { id: 'ticket-help', label: 'Staff Ticket Help', content: 'Open a ticket, choose Staff Only Tickets, select a reason, and enter your own staff ID. You can report staff, log missed hours, or contest an infraction, strike, warning, or demotion.' },
++  { id: 'contact-help', label: 'Management Help', content: 'If your email is not registered or your staff details need correcting, contact the Owner or Co-Owner in Discord. Do not share passwords.' }
++];
++function getGuideConfig(guildId) {
++  const stored = db.find('settings', r => r.key === `staffGuideConfig_${guildId}`)[0]?.value || {};
++  return { melonlyLink: stored.melonlyLink || 'https://melonly.xyz/', buttons: stored.buttons || DEFAULT_BUTTONS.map(b => ({ ...b })) };
++}
++function saveGuideConfig(guildId, config) {
++  const settings = db.load('settings');
++  const key = `staffGuideConfig_${guildId}`;
++  let row = settings.find(s => s.key === key);
++  if (!row) { row = { id: `settings_${key}`, key }; settings.push(row); }
++  row.value = config;
++  db.save('settings', settings);
++}
++function changeInfoButton(guildId, action, id, label, content) {
++  const config = getGuideConfig(guildId);
++  const index = config.buttons.findIndex(b => b.id === id);
++  if (action !== 'add' && index < 0) throw new Error('That button no longer exists. Reopen Staff Guide Settings.');
++  if (action === 'remove') config.buttons.splice(index, 1);
++  else {
++    label = String(label || '').trim(); content = String(content || '').trim();
++    if (!label || label.length > 80 || !content || content.length > 4000) throw new Error('Use a button label of 1–80 characters and information of 1–4000 characters.');
++    if (action === 'add') {
++      if (config.buttons.length >= MAX_INFO_BUTTONS) throw new Error('You can add up to 19 information buttons.');
++      config.buttons.push({ id: randomBytes(6).toString('hex'), label, content });
++    } else if (action === 'edit') config.buttons[index] = { ...config.buttons[index], label, content };
++    else throw new Error('Unknown button action.');
++  }
++  saveGuideConfig(guildId, config);
++  return config;
++}
++function buildGuideMessages(guildId) {
++  const config = getGuideConfig(guildId);
++  const controls = [new ButtonBuilder().setCustomId('staffid_get').setLabel('Get Staff ID').setStyle(ButtonStyle.Primary), ...config.buttons.map(b => new ButtonBuilder().setCustomId(`staffinfo_${b.id}`).setLabel(b.label).setStyle(ButtonStyle.Secondary))];
++  const rows = [];
++  for (let i = 0; i < controls.length; i += 5) rows.push(new ActionRowBuilder().addComponents(...controls.slice(i, i + 5)));
++  const embed = (title, description) => new EmbedBuilder().setTitle(title).setDescription(description).setColor(structure.embedColor);
++  return [
++    { key: 'staff-guide', title: '📘 Staff Guide', payload: { embeds: [embed('📘 Staff Guide', 'Get your permanent staff ID below, or open an information button. Enter the email registered to your Discord account. You do not need to receive or read emails.').addFields(
++      { name: 'Staff Dashboard (Melonly)', value: `[Open Dashboard](${config.melonlyLink})` },
++      { name: 'Staff Tickets', value: 'Open a ticket → Staff Only Tickets. Your own staff ID is required. Go to staff guide to get your staff ID.' }
++    )], components: rows } },
++    { key: 'guide-started', title: '👋 Welcome to the Staff Team!', payload: { embeds: [embed('👋 Welcome to the Staff Team!', 'Read the rules and staff expectations before getting started.').addFields(
++      { name: '🚨 Light Strings (Patrol Vehicle)', value: 'Light String 1 — patrol/driving\nLight String 2 — traffic stops\nLight String 3 — parked or out of your vehicle' },
++      { name: '⚠️ Reporting Other Staff', value: 'Open a Staff Only ticket to report staff misconduct. Contact the Owner or Co-Owner for urgent concerns.' }
++    )] } },
++    { key: 'guide-expectations', title: '📋 Staff Expectations', payload: { embeds: [embed('📋 Staff Expectations', '1. Stay professional and impartial.\n2. Respond to tickets promptly while available.\n3. Log promotions and demotions.\n4. Never abuse admin commands.\n5. Escalate uncertainty to Management.\n6. Treat every member with respect.\n7. Report staff misconduct.')] } },
++    { key: 'guide-punishment', title: '⚖️ Punishment Guide', payload: { embeds: [embed('⚖️ Punishment Guide', '**Community Members:**\nWarning 1 — Verbal warning\nWarning 2 — Verbal warning\nWarning 3 — Verbal warning + final warning DM\nWarning 4 — Kick\nWarning 5 — Permanent ban')] } }
++  ];
++}
++async function publishStaffGuide(guild, { replace = false } = {}) {
++  const channel = guild.channels.cache.find(c => c.name.includes('staff-guide'));
++  if (!channel) throw new Error('Run /setup first to create the staff-guide channel.');
++  for (const item of buildGuideMessages(guild.id)) await publishPanel(guild, channel, item.key, item.payload, m => m.embeds.some(e => e.title === item.title), { replace: replace && item.key === 'staff-guide', pin: item.key !== 'staff-guide' });
++  return channel;
++}
++module.exports = { MAX_INFO_BUTTONS, getGuideConfig, saveGuideConfig, changeInfoButton, buildGuideMessages, publishStaffGuide };
+diff --git a/utils/staffIdentity.js b/utils/staffIdentity.js
+new file mode 100644
+index 0000000..24f5be1
+--- /dev/null
++++ b/utils/staffIdentity.js
+@@ -0,0 +1,60 @@
++const db = require('./dataStore');
++const roles = require('./roles');
++
++function isOwnerTeam(guild, member) {
++  if (!guild || !member) return false;
++  if (guild.ownerId === member.id) return true;
++  return ['OWNER', 'CO_OWNER'].some(key => {
++    const role = roles.resolveRole(guild, key);
++    return role && member.roles.cache.has(role.id);
++  });
++}
++function isStaff(guild, member) {
++  return !!guild && !!member && roles.isStaff(guild, member);
++}
++function normaliseEmail(value) {
++  const email = String(value || '').trim().toLowerCase();
++  if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error('Enter a valid staff email address.');
++  return email;
++}
++function registerEmail(guildId, userId, value, addedBy) {
++  const email = normaliseEmail(value);
++  const rows = db.load('staffIdentities');
++  if (rows.some(r => r.guildId === guildId && r.email === email && r.userId !== userId)) {
++    throw new Error('That email is already assigned to another member.');
++  }
++  let row = rows.find(r => r.guildId === guildId && r.userId === userId);
++  if (!row) {
++    row = { id: `identity_${guildId}_${userId}`, guildId, userId, staffId: null, createdAt: new Date().toISOString() };
++    rows.push(row);
++  }
++  Object.assign(row, { email, addedBy, updatedAt: new Date().toISOString() });
++  db.save('staffIdentities', rows);
++  return row;
++}
++function getIdentity(guildId, userId) {
++  return db.find('staffIdentities', r => r.guildId === guildId && r.userId === userId)[0] || null;
++}
++// Synchronous read/allocate/save, with no await between allocation and persistence.
++// All IDs and email ownership live in one durable, guild-scoped record set.
++function claimIdentity(guildId, userId, value) {
++  const email = normaliseEmail(value);
++  const rows = db.load('staffIdentities');
++  const row = rows.find(r => r.guildId === guildId && r.userId === userId && r.email === email);
++  if (!row) throw new Error('This email is not registered to your Discord account. Ask the Owner or Co-Owner to add it first.');
++  if (!row.staffId) {
++    const maximum = rows.filter(r => r.guildId === guildId).reduce((n, r) => Math.max(n, Number(r.staffId?.match(/^LA-STAFF-(\d+)$/)?.[1] || 0)), 0);
++    row.staffId = `LA-STAFF-${String(maximum + 1).padStart(4, '0')}`;
++    row.claimedAt = new Date().toISOString();
++    db.save('staffIdentities', rows);
++  }
++  return row;
++}
++function checkTicketId(guildId, userId, staffId) {
++  const row = getIdentity(guildId, userId);
++  if (!row?.staffId || row.staffId !== String(staffId || '').trim().toUpperCase()) {
++    throw new Error('Enter your own staff ID. Go to staff guide to get your staff ID.');
++  }
++  return row;
++}
++module.exports = { isOwnerTeam, isStaff, normaliseEmail, registerEmail, getIdentity, claimIdentity, checkTicketId };
+diff --git a/utils/staffTools.js b/utils/staffTools.js
+new file mode 100644
+index 0000000..9eaca52
+--- /dev/null
++++ b/utils/staffTools.js
+@@ -0,0 +1,121 @@
++// Routed from interactionCreate; not a standalone Discord event.
++const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, UserSelectMenuBuilder, StringSelectMenuBuilder, ModalBuilder, TextInputBuilder, TextInputStyle } = require('discord.js');
++const identity = require('./staffIdentity');
++const guide = require('./staffGuide');
++const { publishDashboard } = require('./dashboard');
++const db = require('./dataStore');
++const structure = require('../config/structure');
++const { logAction } = require('./logger');
++
++const reply = (i, content) => i.reply({ content, ephemeral: true, allowedMentions: { parse: [] } });
++const row = (...components) => new ActionRowBuilder().addComponents(...components);
++const button = (id, label, style = ButtonStyle.Secondary) => new ButtonBuilder().setCustomId(id).setLabel(label).setStyle(style);
++function textModal(id, title, fields) {
++  const modal = new ModalBuilder().setCustomId(id).setTitle(title);
++  for (const f of fields) {
++    const input = new TextInputBuilder().setCustomId(f.id).setLabel(f.label).setStyle(f.long ? TextInputStyle.Paragraph : TextInputStyle.Short).setRequired(true).setMaxLength(f.max);
++    if (f.value) input.setValue(f.value);
++    if (f.placeholder) input.setPlaceholder(f.placeholder);
++    modal.addComponents(row(input));
++  }
++  return modal;
++}
++function guideManager(guildId) {
++  const config = guide.getGuideConfig(guildId);
++  return {
++    embeds: [new EmbedBuilder().setTitle('Staff Guide Settings').setDescription('Add, edit, or remove information buttons. Get Staff ID always stays. Changes replace the published guide and refresh the dashboard.').addFields({ name: 'Information buttons', value: config.buttons.map(b => `• ${b.label}`).join('\n') || 'No information buttons.' }).setColor(structure.embedColor)],
++    components: [row(button('staffguide_add', 'Add', ButtonStyle.Success), button('staffguide_edit', 'Edit'), button('staffguide_remove', 'Remove', ButtonStyle.Danger))], ephemeral: true
++  };
++}
++async function saveGuideChange(i, action, id, label, content) {
++  try { guide.changeInfoButton(i.guild.id, action, id, label, content); }
++  catch (err) { await reply(i, err.message); return; }
++  await i.deferReply({ ephemeral: true });
++  try {
++    await guide.publishStaffGuide(i.guild, { replace: true });
++    await publishDashboard(i.guild, { replace: true });
++    await logAction(i.guild, '📘 Staff Guide Updated', `<@${i.user.id}> ${action === 'add' ? 'added' : action === 'edit' ? 'edited' : 'removed'} an information button.`);
++    await i.editReply({ content: '✅ Saved. The staff guide and dashboard have been replaced with the updated panels.', ...guideManager(i.guild.id) });
++  } catch (err) {
++    console.error('Staff guide publish failed:', err);
++    await i.editReply({ content: 'Your changes were saved, but I could not refresh the panels. Check my channel permissions and run /setup to retry.' });
++  }
++}
++async function handleStaffTools(i) {
++  const id = i.customId || '';
++  if (!/^(staffdm_|staffids_|staffguide_|staffid_|staffinfo_)/.test(id)) return false;
++  if (!i.guild) { await reply(i, 'Use this control inside the server.'); return true; }
++  const admin = /^(staffdm_|staffids_|staffguide_)/.test(id);
++  if (admin && !identity.isOwnerTeam(i.guild, i.member)) { await reply(i, 'Only the Owner and Co-Owner can use this control.'); return true; }
++  if (!admin && !identity.isStaff(i.guild, i.member)) { await reply(i, 'This control is for current staff members only.'); return true; }
++
++  if (id === 'staffdm_open' && i.isButton()) {
++    await i.reply({ content: 'Choose the server member who should receive your message.', components: [row(new UserSelectMenuBuilder().setCustomId('staffdm_target').setPlaceholder('Choose a member').setMinValues(1).setMaxValues(1))], ephemeral: true });
++  } else if (id === 'staffdm_target' && i.isUserSelectMenu()) {
++    await i.showModal(textModal(`staffdm_send::${i.values[0]}`, 'Send a Bot DM', [{ id: 'message', label: 'Message to send', long: true, max: 2000 }]));
++  } else if (id.startsWith('staffdm_send::') && i.isModalSubmit()) {
++    const targetId = id.split('::')[1];
++    const message = i.fields.getTextInputValue('message').trim();
++    if (!message || message.length > 2000) { await reply(i, 'Enter a message of 1–2000 characters.'); return true; }
++    await i.deferReply({ ephemeral: true });
++    const member = await i.guild.members.fetch(targetId).catch(() => null);
++    if (!member || member.user.bot) { await i.editReply({ content: 'Choose a human member who is still in this server.' }); return true; }
++    try { await member.send({ content: message, allowedMentions: { parse: [] } }); }
++    catch { await i.editReply({ content: 'I could not deliver that DM. The member may have DMs disabled or may have blocked the bot.' }); return true; }
++    await logAction(i.guild, '📩 Bot DM Sent', `<@${i.user.id}> sent a bot DM to <@${targetId}>. Message content is private.`);
++    await i.editReply({ content: `✅ Your message was sent to <@${targetId}>.` });
++  } else if (id === 'staffids_manage' && i.isButton()) {
++    const records = db.find('staffIdentities', r => r.guildId === i.guild.id);
++    const description = records.slice(0, 20).map(r => `<@${r.userId}> — \`${r.email}\` — **${r.staffId || 'Not claimed'}**`).join('\n') || 'No staff emails have been registered yet.';
++    await i.reply({ embeds: [new EmbedBuilder().setTitle('Staff Emails / IDs').setDescription(description.slice(0, 4000)).setFooter({ text: `${records.length} registered • showing up to 20 • no inbox access required` }).setColor(structure.embedColor)], components: [row(button('staffids_add', 'Add / Update Email', ButtonStyle.Primary))], ephemeral: true });
++  } else if (id === 'staffids_add' && i.isButton()) {
++    await i.reply({ content: 'Select the member this email belongs to. Only that Discord member can claim its staff ID.', components: [row(new UserSelectMenuBuilder().setCustomId('staffids_target').setPlaceholder('Select the staff member').setMinValues(1).setMaxValues(1))], ephemeral: true });
++  } else if (id === 'staffids_target' && i.isUserSelectMenu()) {
++    const existing = identity.getIdentity(i.guild.id, i.values[0]);
++    await i.showModal(textModal(`staffids_save::${i.values[0]}`, 'Register Staff Email', [{ id: 'email', label: 'Assigned staff email', max: 254, value: existing?.email, placeholder: 'staff@yourdomain.com' }]));
++  } else if (id.startsWith('staffids_save::') && i.isModalSubmit()) {
++    const targetId = id.split('::')[1];
++    await i.deferReply({ ephemeral: true });
++    const member = await i.guild.members.fetch(targetId).catch(() => null);
++    if (!member || member.user.bot) { await i.editReply({ content: 'Choose a human member who is still in this server.' }); return true; }
++    let record;
++    try { record = identity.registerEmail(i.guild.id, targetId, i.fields.getTextInputValue('email'), i.user.id); }
++    catch (err) { await i.editReply({ content: err.message }); return true; }
++    await logAction(i.guild, '🪪 Staff Email Registered', `<@${i.user.id}> updated the staff email record for <@${targetId}>.`);
++    await i.editReply({ content: `✅ Email saved for <@${targetId}>. They can use Get Staff ID in staff guide.${record.staffId ? ` Their permanent ID remains **${record.staffId}**.` : ''}` });
++  } else if (id === 'staffid_get' && i.isButton()) {
++    await i.showModal(textModal('staffid_claim', 'Get Your Staff ID', [{ id: 'email', label: 'Registered staff email', max: 254, placeholder: 'No inbox access needed — enter your address' }]));
++  } else if (id === 'staffid_claim' && i.isModalSubmit()) {
++    let record;
++    try { record = identity.claimIdentity(i.guild.id, i.user.id, i.fields.getTextInputValue('email')); }
++    catch (err) { await reply(i, err.message); return true; }
++    await reply(i, `🪪 Your permanent staff ID is **${record.staffId}**.\nUse it when opening Staff Only tickets. Verifying again returns this same ID.`);
++  } else if (id.startsWith('staffinfo_') && i.isButton()) {
++    const info = guide.getGuideConfig(i.guild.id).buttons.find(b => b.id === id.slice('staffinfo_'.length));
++    if (!info) await reply(i, 'This information button was removed. Open the updated staff guide.');
++    else await i.reply({ embeds: [new EmbedBuilder().setTitle(info.label).setDescription(info.content).setColor(structure.embedColor)], ephemeral: true });
++  } else if (id === 'staffguide_manage' && i.isButton()) {
++    await i.reply(guideManager(i.guild.id));
++  } else if (id === 'staffguide_add' && i.isButton()) {
++    if (guide.getGuideConfig(i.guild.id).buttons.length >= guide.MAX_INFO_BUTTONS) { await reply(i, 'Remove a button before adding another. The maximum is 19 information buttons.'); return true; }
++    await i.showModal(textModal('staffguide_save::add', 'Add Information Button', [{ id: 'label', label: 'Button label', max: 80 }, { id: 'info', label: 'Information shown when clicked', long: true, max: 4000 }]));
++  } else if (['staffguide_edit', 'staffguide_remove'].includes(id) && i.isButton()) {
++    const buttons = guide.getGuideConfig(i.guild.id).buttons;
++    if (!buttons.length) { await reply(i, 'There are no information buttons yet. Use Add first.'); return true; }
++    const action = id === 'staffguide_edit' ? 'edit' : 'remove';
++    await i.reply({ content: `Choose the information button to ${action}.`, components: [row(new StringSelectMenuBuilder().setCustomId(`staffguide_select::${action}`).setPlaceholder('Choose a button').addOptions(buttons.map(b => ({ label: b.label, value: b.id }))))], ephemeral: true });
++  } else if (id.startsWith('staffguide_select::') && i.isStringSelectMenu()) {
++    const action = id.split('::')[1];
++    const info = guide.getGuideConfig(i.guild.id).buttons.find(b => b.id === i.values[0]);
++    if (!info) { await reply(i, 'That button was removed. Reopen Staff Guide Settings.'); return true; }
++    if (action === 'remove') await saveGuideChange(i, 'remove', info.id);
++    else if (action === 'edit') await i.showModal(textModal(`staffguide_save::edit::${info.id}`, 'Edit Information Button', [{ id: 'label', label: 'Button label', max: 80, value: info.label }, { id: 'info', label: 'Information shown when clicked', long: true, max: 4000, value: info.content }]));
++    else await reply(i, 'Reopen Staff Guide Settings.');
++  } else if (id.startsWith('staffguide_save::') && i.isModalSubmit()) {
++    const [, action, infoId] = id.split('::');
++    if (!['add', 'edit'].includes(action)) { await reply(i, 'Reopen Staff Guide Settings.'); return true; }
++    await saveGuideChange(i, action, infoId, i.fields.getTextInputValue('label'), i.fields.getTextInputValue('info'));
++  } else await reply(i, 'This control is no longer available. Open the updated dashboard or guide.');
++  return true;
++}
++module.exports = { handleStaffTools };
+diff --git a/utils/ticketTypes.js b/utils/ticketTypes.js
+index 44f7e59..54847f1 100644
+--- a/utils/ticketTypes.js
++++ b/utils/ticketTypes.js
+@@ -34,6 +34,12 @@ function removeTicketType(guildId, key) {
+   saveTicketTypeOverride(guildId, key, { removed: true });
+ }
+ 
+-module.exports = { getTicketTypes, saveTicketTypeOverride, removeTicketType };
++function getTicketType(guildId, key) {
++  return structure.staffTicketTypes[key] || getTicketTypes(guildId)[key];
++}
++function isStaffTicketType(key) {
++  return Object.hasOwn(structure.staffTicketTypes, key);
++}
++module.exports = { getTicketTypes, getTicketType, isStaffTicketType, saveTicketTypeOverride, removeTicketType };
+ 
+ 

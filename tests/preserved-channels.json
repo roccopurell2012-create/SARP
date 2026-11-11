@@ -1,0 +1,61 @@
+{
+  "BULLETIN": [
+    "📚-staff-dashboard",
+    "📖-rules",
+    "⭐-welcome",
+    "📢-announcements",
+    "📢-staff-announcements",
+    "🚨-sessions",
+    "📨-create-a-ticket"
+  ],
+  "APPLICATIONS": [
+    "📄-application",
+    "📊-results",
+    "📊-application-results"
+  ],
+  "COMMUNITY": [
+    "💬-general-chat",
+    "🎭-roleplay-chat",
+    "📸-media-share",
+    "💡-suggestions",
+    "🎁-giveaways"
+  ],
+  "DEPARTMENTS": [
+    "🚔-lapd-department",
+    "🚑-lafd-ems-department",
+    "🚒-lafd-department"
+  ],
+  "STAFF_TEAM": [
+    "📘-staff-guide",
+    "💬-staff-chat",
+    "🙋-staff-request",
+    "⏳-infractions",
+    "📈-promotions-demotions",
+    "📋-loa-requests",
+    "🕒-shift-log",
+    "🚫-blacklist-log",
+    "🤝-partnership-apps"
+  ],
+  "TICKET_QUEUE": [
+    "🎫-ticket-queue"
+  ],
+  "OFFICES": [],
+  "BOT_SYSTEM": [
+    "⚠️-bot-logs",
+    "📊 Members: 0",
+    "🟢 Staff Online: 0",
+    "🎫 Open Tickets: 0"
+  ],
+  "VOICE": [
+    "🚔-lapd-radio",
+    "🚑-lafd-ems-radio",
+    "🚒-lafd-radio",
+    "⚖️-mod-scene-1",
+    "⚖️-mod-scene-2",
+    "⚖️-mod-scene-3",
+    "🔊-general-vc-1",
+    "🔊-general-vc-2",
+    "🔊-general-vc-3"
+  ]
+}
+
